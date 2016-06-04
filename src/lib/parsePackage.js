@@ -5,22 +5,25 @@ import request from 'request';
 import cheerio from 'cheerio';
 import Promise from 'bluebird';
 
-const fetchPromise = (depURL, callback)  => {
+const ERR_URL = 'Couldn\'t complete URL request';
+const ERR_URL_PARSE = 'Couldn\'t load or parse data on this module from npmjs.com';
+
+const fetchURL = (url)  => {
   /**
-  * Given a package url, fetch that url and do the callback to it
-  * This will usually be called using fetchNPM.
-  * @param depurl {string} A fully-qualified URL to the package
-  * @param callback {Function} A callback that takes one parameter.
+  * Given a url, fetch that url
+  * @param depurl {string} A fully-qualified URL
   * This callback will only be called if the URL is successfully gotten
-  * @returns {Function} A Promise
+  * If the request fails, this will throw an error
+  * @returns {string} the esponse content
   * @private
   **/
-  return new Promise((resolve, reject) => {
-    request(depURL, (error, response, content) => {
-      resolve(callback(content));
-      reject(error);
-    });
-  });
+  return request(depURL, (error, response, content) => {
+    if (error) {
+      throw new Error(`${ERR_URL} ${err}`);
+    } else {
+      return content;
+    }
+  }
 };
 
 
@@ -54,15 +57,20 @@ packageParser.depURL = pkg => {
   return `https://www.npmjs.com/package/${pkg}`;
 };
 
-packageParser.fetchNPM = depURL => {
+async packageParser.fetchNPM = depURL => {
   /**
   * Given a package url, fetch that url and get the dependencies
   * Call this instead of fetchPromise.
   * @param depurl {string} A fully-qualified URL to the package
-  * @returns {Function} A resolved or rejected Promise
+  * @returns {Function} A Promise resolving to the parsed HTML of the page
   * @private
   **/
-  return fetchPromise(depURL, (p) => packageParser.parseDependencies(p));
+  try {
+    let html = await request(depURL);
+    return packageParser.parseDependencies(html);
+  } catch(err) {
+    throw new Error(`${ERR_URL_PARSE} ${err}`);
+  }
 };
 
 packageParser.parseDependencies = html => {
@@ -115,25 +123,30 @@ packageParser.parseDockers = dockerJSON => {
   return dockers;
 }
 
-packageParser.fetchDockers = url => {
+async packageParser.fetchDockers = url => {
   /**
   * Grabs all Official Docker repositories
   * @param {string} A URL, but usually we won't need this and will use the default
-  * @returns {Function} A resolved or rejected Promise
+  * @returns {Function} A Promise resolving to the parsed list of official Dockerfiles
   * @private
   **/
   const dockerURL = url || 'https://hub.docker.com/v2/repositories/library/?page_size=999';
-  return fetchPromise(dockerURL, (p) => packageParser.parseDockers(p));
+
+  try {
+    let dockers = await request(dockerURL);
+    return packageParser.parseDockers(dockers);
+  } catch(err) {
+    throw new Error(`${ERR_URL_PARSE} ${err}`);
+  }
 };
 
-packageParser.matchDependencies = path_to_pkg => {
+async packageParser.matchDependencies = path_to_pkg => {
   /**
   * Given a package, return an object with the docker modules needed to launch
   * that package. This method pulls together all other methods in this object.
-  * Response is an object that shows the docker module.
+  * Response is an array that shows the docker modules needed.
   * Example response:
-  *   {  mongo : true,
-  *   redis: true, }
+  *   [mongo, redis]
   * @param {string} The path, from root of application (_not_ from this module) to the package.json to load
   * @returns {Object} An object describing all of the needed docker modules
   **/
@@ -149,8 +162,6 @@ packageParser.matchDependencies = path_to_pkg => {
   //  if an individual module is in that list
   let depList = {};
 
-  const dockerPromises = this.fetchDockers();
-
   // We now have an array of NPM URLs
   // We need to iterate over the array
   packageURLs.forEach(url => {
@@ -159,26 +170,36 @@ packageParser.matchDependencies = path_to_pkg => {
     depPromises.push(this.fetchNPM(url));
   });
 
-  // Get a returnable Promise
-  return Promise.all(depPromises)
-    .then(() => {
-      // As each individual npm page fetch completes,
-      Promise.each(depPromises, (promiseList) => {
-        // Get the keywords and add to an array of keywords
-        depKeywords = depKeywords.concat(promiseList);
-      });
-    }).then(() => {
-      // When all npm page fetch-and-parses have resolved
-      dockerPromises.then(data => {
-        depKeywords.forEach(kw => {
-          // For each keyword from an npm page
-          if (!depList.hasOwnProperty(kw) && data.hasOwnProperty(kw)) {
-            // If there's not a key in depList with that name
-            // And if there's a matching Docker module
-            // Add a key
-            depList[kw] = true;
-          }
+  try {
+    const dockerPromises = await this.fetchDockers();
+  } catch(err) {
+    throw new Error(`${ERR_URL_PARSE} ${err}`);
+  }
+
+  try {
+    // Get a returnable Promise
+    return await Promise.all(depPromises)
+      .then(() => {
+        // As each individual npm page fetch completes,
+        Promise.each(depPromises, (promiseList) => {
+          // Get the keywords and add to an array of keywords
+          depKeywords = depKeywords.concat(promiseList);
         });
-      });
-    }).then(() => Object.keys(depList));
+      }).then(() => {
+        // When all npm page fetch-and-parses have resolved
+        dockerPromises.then(data => {
+          depKeywords.forEach(kw => {
+            // For each keyword from an npm page
+            if (!depList.hasOwnProperty(kw) && data.hasOwnProperty(kw)) {
+              // If there's not a key in depList with that name
+              // And if there's a matching Docker module
+              // Add a key
+              depList[kw] = true;
+            }
+          });
+        });
+      }).then(() => Object.keys(depList));
+  } catch(err) {
+    throw new Error(`${ERR_URL_PARSE} ${err}`);
+  }
 };
